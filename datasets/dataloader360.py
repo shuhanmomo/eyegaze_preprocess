@@ -63,8 +63,16 @@ class EyeGaze360Dataset(Dataset):
         sem_feats_padded[:valid_len] = torch.from_numpy(sp_sem_feats[:valid_len])
 
         # dec_input (shifted scanpath)
-        dec_input = torch.zeros(self.max_length, 3)
-        dec_input[1:valid_len] = scanpath[:valid_len-1]
+        dec_scan= torch.zeros(self.max_length, 3)
+        dec_scan[1:valid_len] = scanpath[:valid_len-1]
+
+        # dec_input for image_feats
+        dec_image_feats = torch.zeros(self.max_length, 2048)
+        dec_image_feats[1:valid_len] = img_feats_padded[:valid_len-1]
+
+        # dec_input for sem_feats
+        dec_sem_feats = torch.zeros(self.max_length, 512)
+        dec_sem_feats[1:valid_len] = sem_feats_padded[:valid_len-1]
 
         # dec_mask
         dec_mask = torch.zeros(self.max_length)
@@ -77,7 +85,9 @@ class EyeGaze360Dataset(Dataset):
             'imgs': image,                  # The pre-extracted image tensor
             'scanpath': scanpath,           # [L, 3]
             'valid_len': valid_len,
-            'dec_inputs': dec_input,
+            'dec_scan': dec_scan,
+            'dec_image_feats': dec_image_feats, # shifted image feats
+            'dec_sem_feats': dec_sem_feats,     # shifted sem feats
             'dec_masks': dec_mask,
             'csv_ids': sp_csv_id,           # ID of the testee
             'image_feats': img_feats_padded,# [L, 2048]

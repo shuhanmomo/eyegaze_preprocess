@@ -3,7 +3,7 @@ import numpy as np
 import torch.nn as nn
 from einops import rearrange, repeat
 import torch
-
+from einops import rearrange
 from modules.mdn3d import MDN3D
 from modules.sphere_cnn import Sphere_CNN
 
@@ -306,11 +306,54 @@ class Encoder(nn.Module):
             enc_self_attns.append(enc_self_attn)
         return enc_outputs, enc_self_attns
 
+class FixationEmbeddingFusion(nn.Module):
+    def __init__(self, d_model, d_scanpath=3, d_img=2048, d_sem=512, n_heads=1, dropout=0.1):
+        super(FixationEmbeddingFusion, self).__init__()
+        # Project each modality to d_model
+        self.scanpath_proj = nn.Linear(d_scanpath, d_model)
+        self.img_proj = nn.Linear(d_img, d_model)
+        self.sem_proj = nn.Linear(d_sem, d_model)
+        self.fusion_attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=n_heads, dropout=dropout)
+        self.layer_norm = nn.LayerNorm(d_model)
+
+    def forward(self, xyz, image_feats, sem_feats):
+        # xyz: [B, L, 3]
+        # image_feats: [B, L, 2048]
+        # sem_feats: [B, L, 512]
+        B, L, _ = xyz.size()
+
+        # Project each to d_model
+        xyz_emb = self.scanpath_proj(xyz)        # [B, L, d_model]
+        img_emb = self.img_proj(image_feats)     # [B, L, d_model]
+        sem_emb = self.sem_proj(sem_feats)       # [B, L, d_model]
+
+        # Stack along a new dimension: [B, L, 3, d_model]
+        combined = torch.stack([xyz_emb, img_emb, sem_emb], dim=2)
+        # Reshape to [B*L, 3, d_model] to treat each fixation as a separate mini-sequence
+        combined = rearrange(combined, 'b l n d -> (b l) n d', n=3)
+
+        # In multihead attention:  
+        # Inputs should be [seq_len, batch, embed_dim]
+        combined = combined.transpose(0, 1)  # [3, B*L, d_model]
+
+        # Self-attention on these 3 tokens:
+        fused, _ = self.fusion_attn(combined, combined, combined)  # [3, B*L, d_model]
+
+        fused = fused.mean(dim=0)  # [B*L, d_model]
+
+        # Reshape back to [B, L, d_model]
+        fused = fused.view(B, L, -1)
+
+        # Layer norm for stability
+        fused = self.layer_norm(fused)
+
+        return fused  # [B, L, d_model]
+
 
 class Decoder(nn.Module):
     def __init__(self, d_model, postion_method, max_length, d_k, d_v, n_heads, d_ff, dropout, dec_n_layers):
         super(Decoder, self).__init__()
-        self.tgt_emb = nn.Linear(3, d_model)
+        
         if postion_method == 'fixed':
             self.pos_embed = FixedAbsolutePositionEmbedding(max_length, d_model,
                                                             position_embedding_type='fixed')  # Fix 位置编码
@@ -321,7 +364,7 @@ class Decoder(nn.Module):
             [DecoderLayer(d_model, d_k, d_v, n_heads, d_ff, dropout) for _ in range(dec_n_layers)])
 
     def forward(self, enc_outputs, dec_inputs, enc_masks, dec_masks):
-        dec_outputs = self.tgt_emb(dec_inputs)
+        dec_outputs = dec_inputs
         dec_self_attn_pad_mask = get_attn_pad_mask(dec_masks, dec_masks)
         dec_self_attn_subsequent_mask = get_attn_subsequent_mask(dec_masks).to(enc_outputs.device)
         dec_self_attn_mask = torch.gt((dec_self_attn_pad_mask + dec_self_attn_subsequent_mask), 0)
@@ -354,7 +397,7 @@ class Transformer(nn.Module):
 
         self.feature_extrator = Sphere_CNN(out_put_dim=feature_dim, out_h=128, out_w=256,
                                            patch_size=patch_size)   # 用sphere_cnn
-
+        self.fixation_embed = FixationEmbeddingFusion(d_model=d_model)
         self.replace_encoder = replace_encoder
         if not replace_encoder:
             self.encoder = Encoder(feature_dim, d_model, d_k, d_v, n_heads, d_ff, dropout,
@@ -364,12 +407,15 @@ class Transformer(nn.Module):
             # Transformer中位置编码时固定的，不需要学习
             self.pos_emb = PositionEmbeddingSine(d_model, num_patch_h, num_patch_w)
 
+         # CLS token for the decoder sequence
+        self.cls_token = nn.Parameter(torch.randn(1, 1, d_model))
         self.decoder = Decoder(d_model, postion_method, max_length, d_k, d_v, n_heads, d_ff, dropout, dec_n_layers)
         self.mdn = MDN3D(input_dim=d_model, MDN_hidden_num=MDN_hidden_num, num_gaussians=num_gauss,
                          action_map_size=action_map_size)
 
-    def forward(self, input_images, dec_inputs, dec_masks):
-        enc_inputs = self.feature_extrator(input_images)  # SphereCNN
+    def forward(self, input_images, dec_scan, dec_img, dec_sem, dec_masks):
+        # Encode the image using SphereCNN (and possibly an encoder)
+        enc_inputs = self.feature_extrator(input_images)
 
         if self.replace_encoder:
             enc_outputs = self.src_emb(enc_inputs)
@@ -378,7 +424,25 @@ class Transformer(nn.Module):
         else:
             enc_outputs, enc_self_attns = self.encoder(enc_inputs, None)
 
-        dec_outputs, dec_self_attns, dec_enc_attns = self.decoder(enc_outputs, dec_inputs, None, dec_masks)
-        pi, mu, sigma, rho = self.mdn(dec_outputs)
+        # Fuse scanpath (xyz), image_feats, and sem_feats into d_model embeddings
+        dec_inputs = self.fixation_embed(dec_scan, dec_img, dec_sem)  # [B, L, d_model]
 
-        return pi, mu, sigma, rho
+        # Add CLS token at the start of dec_inputs
+        B = dec_inputs.size(0)
+        cls_token_expanded = self.cls_token.expand(B, -1, -1)  # [B, 1, d_model]
+        dec_inputs = torch.cat([cls_token_expanded, dec_inputs], dim=1)  # [B, L+1, d_model]
+
+        # Adjust dec_masks to account for the CLS token
+        # The CLS token is never masked, so add a leading zero column
+        dec_masks = torch.cat([torch.zeros(B, 1, device=dec_masks.device), dec_masks], dim=1)  # [B, L+1]
+
+        # Pass the extended sequence with CLS through the decoder
+        dec_outputs, dec_self_attns, dec_enc_attns = self.decoder(enc_outputs, dec_inputs, None, dec_masks)
+
+        # dec_outputs now includes CLS token at dec_outputs[:,0,:]
+        # The first actual fixation prediction starts at dec_outputs[:,1,:]
+
+        pi, mu, sigma, rho = self.mdn(dec_outputs[:, 1:, :])
+        path_embed = dec_outputs[:, 0, :]
+
+        return pi, mu, sigma, rho,path_embed
