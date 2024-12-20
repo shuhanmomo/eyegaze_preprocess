@@ -107,7 +107,8 @@ def PositionEmbeddingSine(d_model, num_patch_h, num_patch_w):
         x_embed = x_embed / (x_embed[:, :, -1:] + eps) * scale
 
     dim_t = torch.arange(num_pos_feats, dtype=torch.float32, )
-    dim_t = temperature ** (2 * (dim_t // 2) / num_pos_feats)
+    dim_t = temperature ** (2 * torch.div(dim_t, 2, rounding_mode='trunc') / num_pos_feats)
+
 
     pos_x = x_embed[:, :, :, None] / dim_t
     pos_y = y_embed[:, :, :, None] / dim_t
@@ -355,10 +356,10 @@ class Decoder(nn.Module):
         super(Decoder, self).__init__()
         
         if postion_method == 'fixed':
-            self.pos_embed = FixedAbsolutePositionEmbedding(max_length, d_model,
+            self.pos_embed = FixedAbsolutePositionEmbedding(max_length+1, d_model,
                                                             position_embedding_type='fixed')  # Fix 位置编码
         elif postion_method == 'learning':
-            self.pos_embed = LearnableAbsolutePositionEmbedding(max_length, d_k * n_heads)  # learning 位置编码
+            self.pos_embed = LearnableAbsolutePositionEmbedding(max_length+1, d_k * n_heads)  # learning 位置编码
 
         self.layers = nn.ModuleList(
             [DecoderLayer(d_model, d_k, d_v, n_heads, d_ff, dropout) for _ in range(dec_n_layers)])
@@ -408,6 +409,7 @@ class Transformer(nn.Module):
             self.pos_emb = PositionEmbeddingSine(d_model, num_patch_h, num_patch_w)
 
          # CLS token for the decoder sequence
+        self.d_model = d_model
         self.cls_token = nn.Parameter(torch.randn(1, 1, d_model))
         self.decoder = Decoder(d_model, postion_method, max_length, d_k, d_v, n_heads, d_ff, dropout, dec_n_layers)
         self.mdn = MDN3D(input_dim=d_model, MDN_hidden_num=MDN_hidden_num, num_gaussians=num_gauss,
@@ -441,7 +443,6 @@ class Transformer(nn.Module):
 
         # dec_outputs now includes CLS token at dec_outputs[:,0,:]
         # The first actual fixation prediction starts at dec_outputs[:,1,:]
-
         pi, mu, sigma, rho = self.mdn(dec_outputs[:, 1:, :])
         path_embed = dec_outputs[:, 0, :]
 

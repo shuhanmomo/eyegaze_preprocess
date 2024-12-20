@@ -26,11 +26,16 @@ class Trainer:
                 optimizer.zero_grad()
 
                 train_batch_size = batch['imgs'].shape[0]
-                max_length = batch['dec_inputs'].shape[-2]
+                # print(f"train_batch_size:{train_batch_size}, img {batch['imgs'].shape}")
+    
+                max_length = batch['dec_scan'].shape[-2]
 
-                pis, mus, sigmas, rhos = model(batch['imgs'].to(self.device),
-                                               batch['dec_inputs'].float().to(self.device),
+                pis, mus, sigmas, rhos,path_embed = model(batch['imgs'].to(self.device),
+                                               batch['dec_scan'].float().to(self.device),
+                                               batch['dec_image_feats'].float().to(self.device),
+                                               batch['dec_sem_feats'].float().to(self.device),
                                                batch['dec_masks'].to(self.device))
+
                 # 混合密度网络损失
                 probs = mixture_probability(pis, mus, sigmas, rhos,
                                             batch['scanpath'].unsqueeze(-1).to(self.device)).squeeze()
@@ -69,12 +74,12 @@ class Trainer:
 
             if (self.cur_epoch + 1) % self.val_step == 0:
                 save_checkpoint(self.cur_epoch, model, optimizer, self.work_dir)
-                score = evaluation.validation(model, self.cur_epoch, dataset_name='sitzmann', save=False)
+                score = evaluation.validation(model, self.cur_epoch, dataset_name='momo', save=False)
                 if score < best_score:
                     best_score = score
                     best_epoch = self.cur_epoch
-                evaluation.validation(model, self.cur_epoch, dataset_name='salient360', save=False)
-                evaluation.validation(model, self.cur_epoch, dataset_name='aoi', save=False)
-                evaluation.validation(model, self.cur_epoch, dataset_name='jufe', save=False)
+                # evaluation.validation(model, self.cur_epoch, dataset_name='salient360', save=False)
+                # evaluation.validation(model, self.cur_epoch, dataset_name='aoi', save=False)
+                # evaluation.validation(model, self.cur_epoch, dataset_name='jufe', save=False)
 
         return best_epoch

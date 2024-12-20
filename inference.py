@@ -85,7 +85,7 @@ if __name__ == '__main__':
                                                                                                      n + 1).to(
                                                                                    cfg.device))
 
-                    pis, mus, sigmas, rhos = model.mdn(dec_outputs)
+                    pis, mus, sigmas, rhos = model.mdn(dec_outputs[:,1:,:])
                     outputs = model.mdn.sample_prob(pis, mus, sigmas, rhos).to(cfg.device)
                     last_fixations = outputs[:, -1]
 

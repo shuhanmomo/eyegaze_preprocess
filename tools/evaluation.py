@@ -1,6 +1,7 @@
 import os
 from statistics import mean
-from datasets.dataloder import Scanpath360Dataloder
+
+from datasets.dataloader360 import EyeGaze360DataLoader
 from metircs.suppor_lib import xyz2sphere
 from metircs.utils import get_score_filename
 import torch
@@ -19,29 +20,14 @@ class Evaluation:
         self.max_length = max_length
         self.action_map_size = action_map_size
         self.test_dataiters = {
-            "sitzmann": Scanpath360Dataloder(dataset_name='sitzmann', phase='test',
-                                             batch_size=val_batch_size,
-                                             image_input_resize=image_input_resize,
-                                             patch_size=patch_size, max_length=max_length, seed=seed),
-            "salient360": Scanpath360Dataloder(dataset_name='salient360', phase='test',
-                                               batch_size=val_batch_size,
-                                               image_input_resize=image_input_resize,
-                                               patch_size=patch_size, max_length=max_length, seed=seed),
-
-            "aoi": Scanpath360Dataloder(dataset_name='aoi', phase='all',
-                                        batch_size=val_batch_size,
-                                        image_input_resize=image_input_resize,
-                                        patch_size=patch_size, max_length=max_length, seed=seed),
-
-            "jufe": Scanpath360Dataloder(dataset_name='jufe', phase='all',
-                                         batch_size=val_batch_size, image_input_resize=image_input_resize,
-                                         patch_size=patch_size, max_length=max_length, seed=seed),
+            "momo":EyeGaze360DataLoader(phase='test',batch_size=val_batch_size,max_length=max_length,seed=seed),
         }
 
     def validation(self, model, epoch, dataset_name, save=False, ):
         dataset_name = dataset_name.lower()
 
         model.eval()
+        d_model = model.d_model
         save_dir_path = os.path.join(self.work_dir, "seq_results_best_model", dataset_name)
 
         if save and not os.path.exists(save_dir_path):
@@ -55,7 +41,10 @@ class Evaluation:
                 val_batch_size = batch['imgs'].size(0)
                 enc_masks = None
                 # dec_inputs = torch.ones(val_batch_size, 1, 3).to(self.device) * 0.5
-                dec_inputs = torch.zeros(val_batch_size, 1, 3).to(self.device)
+                dec_scan = torch.zeros(val_batch_size, 1, 3).to(self.device)
+                dec_img = torch.zeros(val_batch_size, 1, 2048).to(self.device)   # if no dynamic features, keep zeros
+                dec_sem = torch.zeros(val_batch_size, 1, 512).to(self.device)    # similarly zeros if no semantic info
+
                 imgs = batch['imgs'].to(self.device)
 
                 enc_inputs = model.feature_extrator(imgs)
@@ -67,17 +56,24 @@ class Evaluation:
                 else:
                     enc_outputs, enc_self_attns = model.encoder(enc_inputs, None)
                 for n in range(self.max_length):
-                    dec_outputs, dec_self_attns, dec_enc_attns = model.decoder(enc_outputs, dec_inputs,
+                    fused = model.fixation_embed(dec_scan, dec_img, dec_sem)
+                    cls_token_expanded = model.cls_token.expand(val_batch_size, -1, -1)
+                    fused_with_cls = torch.cat([cls_token_expanded, fused], dim=1)  
+                    dec_masks = torch.zeros(val_batch_size, fused_with_cls.size(1)).to(self.device)
+                    dec_outputs, dec_self_attns, dec_enc_attns = model.decoder(enc_outputs, fused_with_cls,
                                                                                enc_masks=enc_masks,
-                                                                               dec_masks=torch.zeros(val_batch_size,
-                                                                                                     n + 1).to(
+                                                                               dec_masks=dec_masks.to(
                                                                                    self.device))
 
-                    pis, mus, sigmas, rhos = model.mdn(dec_outputs)
+                    pis, mus, sigmas, rhos = model.mdn(dec_outputs[:,1:,:])
                     outputs = model.mdn.sample_prob(pis, mus, sigmas, rhos).to(self.device)
                     last_fixations = outputs[:, -1]
 
-                    dec_inputs = torch.cat((dec_inputs, last_fixations.unsqueeze(1)), dim=1)
+                    dec_scan = torch.cat([dec_scan, last_fixations.unsqueeze(1)], dim=1)
+                    zero_img = torch.zeros(val_batch_size, 1, 2048).to(self.device)
+                    zero_sem = torch.zeros(val_batch_size, 1, 512).to(self.device)
+                    dec_img = torch.cat([dec_img, zero_img], dim=1)
+                    dec_sem = torch.cat([dec_sem, zero_sem], dim=1)
                 probs = mixture_probability(pis, mus, sigmas, rhos,
                                             batch['scanpath'].unsqueeze(-1).to(self.device)).squeeze()
 
@@ -89,7 +85,7 @@ class Evaluation:
                 loss = torch.mean(-torch.log(probs))
                 loss_item = loss.detach().cpu().item()
 
-                outputs = dec_inputs[:, 1:, :].cpu().numpy()  # 用解码器输入作为预测点
+                outputs = dec_scan[:, 1:, :].cpu().numpy()  # 用解码器输入作为预测点
 
                 for batch_index in range(val_batch_size):
                     output = outputs[batch_index]
@@ -99,15 +95,15 @@ class Evaluation:
                         save_path = os.path.join(save_dir_path, batch['file_names'][batch_index] + '.pck')
                         torch.save(output_sphere, save_path)
                     else:
-                        scores = get_score_filename(pred_fixation_sphere=output_sphere.numpy(),
-                                                    file_name=batch['file_names'][batch_index],
-                                                    dataset_name=dataset_name, )
+                        # scores = get_score_filename(pred_fixation_sphere=output_sphere.numpy(),
+                        #                             file_name=batch['file_names'][batch_index],
+                        #                             dataset_name=dataset_name, )
 
                         val_performance['loss'].append(loss_item)
-                        for metric, score in scores.items():
-                            val_performance[metric].append(score)
+                        # for metric, score in scores.items():
+                        #     val_performance[metric].append(score)
 
-                        print(f"Epoch: {epoch}, val_loss = {loss_item},  val_score {scores}")
+                        print(f"Epoch: {epoch}, val_loss = {loss_item}")
                 if not save and i_batch > 5:
                     break
             for metric, scores_list in val_performance.items():
@@ -125,4 +121,4 @@ class Evaluation:
                         self.writer.add_scalar(f'AA_Scalar/val_{dataset_name}_{key}', value, epoch)
                     else:
                         self.writer.add_scalar(f'val_{dataset_name}/{key}', value, epoch)
-        return val_performance['d-DTW']
+        return val_performance['loss']

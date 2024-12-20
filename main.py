@@ -1,7 +1,8 @@
 import argparse
 import os
 from torch import optim
-from datasets.dataloder import Scanpath360Dataloder
+# from datasets.dataloder import Scanpath360Dataloder
+from datasets.dataloader360 import EyeGaze360DataLoader
 from tools.evaluation import Evaluation
 from torch.utils.tensorboard import SummaryWriter
 from modules.transformer import Transformer
@@ -9,6 +10,10 @@ from tools.train import Trainer
 from mmcv import Config, DictAction
 from datetime import datetime
 from utils.utils import setup_seed, loadCheckpoint
+import warnings
+warnings.filterwarnings('ignore', message="On January 1, 2023, MMCV will release v2.0.0")
+
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train a model or Inference')
@@ -29,12 +34,12 @@ if __name__ == '__main__':
         cfg.merge_from_dict(args.options)
 
     assert cfg.work_dir
-    if not cfg.wo_train:
-        cfg.work_dir = os.path.join('/data/lyt/02-Results/01-ScanPath/logs/',
-                                    datetime.today().strftime('%m-%d-') + cfg.work_dir)
-    else:
-        assert cfg.reload_path
-        cfg.work_dir = os.path.join('/data/lyt/02-Results/01-ScanPath/logs/', cfg.work_dir)
+    # if not cfg.wo_train:
+    #     cfg.work_dir = os.path.join('/data/lyt/02-Results/01-ScanPath/logs/',
+    #                                 datetime.today().strftime('%m-%d-') + cfg.work_dir)
+    # else:
+    #     assert cfg.reload_path
+    #     cfg.work_dir = os.path.join('/data/lyt/02-Results/01-ScanPath/logs/', cfg.work_dir)
     if not cfg.wo_train:
         writer = SummaryWriter(log_dir=cfg.work_dir)
     else:
@@ -52,7 +57,7 @@ if __name__ == '__main__':
                         MDN_hidden_num=cfg.MDN_hidden_num, num_gauss=cfg.num_gauss, action_map_size=cfg.action_map_size,
                         replace_encoder=cfg.replace_encoder
                         ).to(cfg.device)
-
+    print('-----------Built Model--------------')
     if not cfg.feature_grad:
         for p in model.feature_extrator.parameters():
             p.requires_grad = False
@@ -65,7 +70,7 @@ if __name__ == '__main__':
     else:  # resume from break-point: reload checkpoint from dir workdir
         epoch_start, model, optimizer = loadCheckpoint(model=model, optimizer=optimizer, work_dir=cfg.work_dir)
 
-    print('-----------------model results will be in :', cfg.work_dir)
+    print('-----------model results will be in :', cfg.work_dir)
     cfg.dump(os.path.join(cfg.work_dir, 'config.py'))
 
     evaluation = Evaluation(work_dir=cfg.work_dir, writer=writer,
@@ -75,11 +80,8 @@ if __name__ == '__main__':
                             patch_size=cfg.patch_size, )
 
     if not cfg.wo_train:
-        train_dataloder = Scanpath360Dataloder(dataset_name=cfg.train_dataset, phase='train',
-                                               batch_size=cfg.train_batch_size,
-                                               image_input_resize=cfg.image_input_resize,
-                                               patch_size=cfg.patch_size, max_length=cfg.max_length, seed=cfg.seed)
-
+        train_dataloder = EyeGaze360DataLoader(phase='train',batch_size=cfg.train_batch_size,max_length=cfg.max_length,seed=cfg.seed)
+        print('-----------Built Dataset--------------')
         train = Trainer(lr=cfg.lr, dataloder=train_dataloder, work_dir=cfg.work_dir, device=cfg.device,
                         start_epoch=epoch_start, epoch_nums=cfg.epoch_nums, val_step=cfg.val_step,
                         writer=writer)
@@ -96,9 +98,9 @@ if __name__ == '__main__':
         best_epoch = epoch_start
         score_prefix = cfg.reload_path.split('/')[-1].split('.')[0]
 
-    if not cfg.wo_inference:
-        # inference results
-        evaluation.validation(model, best_epoch, dataset_name='sitzmann', save=True, )
-        evaluation.validation(model, best_epoch, dataset_name='jufe', save=True)
-        evaluation.validation(model, best_epoch, dataset_name='salient360', save=True)
-        evaluation.validation(model, best_epoch, dataset_name='aoi', save=True)
+    # if not cfg.wo_inference:
+    #     # inference results
+    #     evaluation.validation(model, best_epoch, dataset_name='sitzmann', save=True, )
+    #     evaluation.validation(model, best_epoch, dataset_name='jufe', save=True)
+    #     evaluation.validation(model, best_epoch, dataset_name='salient360', save=True)
+    #     evaluation.validation(model, best_epoch, dataset_name='aoi', save=True)

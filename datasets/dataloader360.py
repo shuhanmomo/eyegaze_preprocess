@@ -51,7 +51,7 @@ class EyeGaze360Dataset(Dataset):
         # Truncate or pad to max_length
         valid_len = min(sp_length, self.max_length)
         # scanpath
-        scanpath = torch.zeros(self.max_length, 3, dtype=sp.dtype)
+        scanpath = torch.zeros(self.max_length, 3, dtype= torch.float)
         scanpath[:valid_len] = torch.from_numpy(sp[:valid_len]) if isinstance(sp, np.ndarray) else sp[:valid_len]
 
         # image_feats
